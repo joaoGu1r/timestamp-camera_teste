@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Timestamp Camera</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <div class="camera-view">
+      <video id="video" autoplay playsinline muted></video>
+      <img id="preview" alt="Foto capturada" hidden>
+      <div class="clock-overlay">
+        <span id="clock">--/--/---- --:--:--</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="btn-capture" disabled>📷 Capturar</button>
+      <button id="btn-download" hidden>💾 Baixar</button>
+      <button id="btn-retake" hidden>🔄 Nova foto</button>
+    </div>
+
+    <div id="status" class="status">Iniciando...</div>
+  </div>
+
+  <canvas id="canvas" hidden></canvas>
+  <script src="script.js"></script>
+</body>
+</html>
