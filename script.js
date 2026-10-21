@@ -11,6 +11,10 @@ const statusEl = document.getElementById('status');
 // --- Estado ---
 let currentPosition = null;
 let stream = null;
+let isCapturing = false;
+
+// Cache simples de geocodificação (coordenadas arredondadas → endereço)
+const geocodeCache = new Map();
 
 // --- Utils ---
 const pad = (n) => String(n).padStart(2, '0');
@@ -56,7 +60,6 @@ async function startCamera() {
   video.srcObject = stream;
   await video.play();
 
-  // Garante que videoWidth/videoHeight estejam disponíveis
   if (!video.videoWidth) {
     await new Promise((res) =>
       video.addEventListener('loadedmetadata', res, { once: true })
@@ -95,32 +98,70 @@ function startClock() {
   setInterval(tick, 1000);
 }
 
-// --- Captura ---
-function capture() {
-  if (!video.videoWidth) {
-    setStatus('Câmera ainda carregando...', 'warn');
-    return;
+// --- Geocodificação reversa (Nominatim / OpenStreetMap) ---
+async function obterNomeDaRua(lat, lng) {
+  // Chave do cache com ~11m de precisão (suficiente para reutilizar endereço)
+  const cacheKey = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey);
+
+  const url = new URL('https://nominatim.openstreetmap.org/reverse');
+  url.searchParams.set('lat', lat);
+  url.searchParams.set('lon', lng);
+  url.searchParams.set('format', 'jsonv2');
+  url.searchParams.set('addressdetails', '1');
+  url.searchParams.set('accept-language', 'pt-BR');
+
+  // Timeout de 6s para não travar a UI
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const response = await fetch(url.toString(), {
+      signal: controller.signal,
+      headers: {
+        // Identificação obrigatória pelas políticas do Nominatim
+        'User-Agent': 'TimestampCameraWeb/1.0 (timestamp-camera)'
+      }
+    });
+    clearTimeout(timeoutId);
+
+    if (response.status === 429) {
+      console.warn('Nominatim: limite de requisições atingido.');
+      return null;
+    }
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const addr = data.address || {};
+
+    // Prioriza via/pedestre; senão bairro/cidade
+    const rua = addr.road || addr.pedestrian || addr.footway || addr.path;
+    const bairro = addr.suburb || addr.neighbourhood || addr.city_district;
+    const cidade = addr.city || addr.town || addr.village || addr.municipality;
+
+    let resultado = null;
+    if (rua) {
+      resultado = [rua, bairro, cidade].filter(Boolean).join(', ');
+    } else if (data.display_name) {
+      // Fallback: pega as 2 primeiras partes do display_name
+      resultado = data.display_name.split(',').slice(0, 2).join(',').trim();
+    }
+
+    if (resultado) geocodeCache.set(cacheKey, resultado);
+    return resultado;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.warn('Geocodificação: timeout');
+    } else {
+      console.error('Erro na geocodificação reversa:', err);
+    }
+    return null;
   }
+}
 
-  const w = video.videoWidth;
-  const h = video.videoHeight;
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-
-  // Desenha o frame atual do vídeo
-  ctx.drawImage(video, 0, 0, w, h);
-
-  // Monta as linhas de metadados
-  const lines = [formatDate(new Date())];
-  if (currentPosition) {
-    lines.push(formatCoord(currentPosition.lat, currentPosition.lng));
-    lines.push(`Precisão: ±${Math.round(currentPosition.accuracy)}m`);
-  } else {
-    lines.push('Localização indisponível');
-  }
-
-  // Dimensiona o texto proporcionalmente à imagem
+// --- Desenho dos metadados no canvas ---
+function desenharMetadados(ctx, w, h, lines) {
   const fontSize = Math.max(18, Math.round(w / 42));
   const padding = Math.round(fontSize * 0.7);
   const lineHeight = Math.round(fontSize * 1.35);
@@ -142,15 +183,69 @@ function capture() {
   lines.forEach((line, i) => {
     ctx.fillText(line, padding, boxY + padding + i * lineHeight);
   });
+}
 
-  // Exibe o resultado
-  preview.src = canvas.toDataURL('image/jpeg', 0.92);
-  preview.hidden = false;
-  video.hidden = true;
-  btnCapture.hidden = true;
-  btnDownload.hidden = false;
-  btnRetake.hidden = false;
-  setStatus('Foto capturada', 'ok');
+// --- Captura ---
+async function capture() {
+  if (isCapturing) return;
+  if (!video.videoWidth) {
+    setStatus('Câmera ainda carregando...', 'warn');
+    return;
+  }
+
+  isCapturing = true;
+  btnCapture.disabled = true;
+
+  try {
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+
+    // 1) Congela o frame atual imediatamente (preserva o "momento")
+    ctx.drawImage(video, 0, 0, w, h);
+
+    // 2) Monta as linhas — data/hora agora
+    const lines = [formatDate(new Date())];
+
+    // 3) Resolve o endereço (com fallback para coordenadas)
+    if (currentPosition) {
+      setStatus('Obtendo endereço...', 'warn');
+      const nomeRua = await obterNomeDaRua(
+        currentPosition.lat,
+        currentPosition.lng
+      );
+
+      if (nomeRua) {
+        lines.push(nomeRua);
+      } else {
+        // Fallback: coordenadas cruas
+        lines.push(formatCoord(currentPosition.lat, currentPosition.lng));
+        lines.push('(endereço indisponível)');
+      }
+    } else {
+      lines.push('Localização indisponível');
+    }
+
+    // 4) Desenha os metadados sobre o frame já congelado
+    desenharMetadados(ctx, w, h, lines);
+
+    // 5) Exibe o resultado
+    preview.src = canvas.toDataURL('image/jpeg', 0.92);
+    preview.hidden = false;
+    video.hidden = true;
+    btnCapture.hidden = true;
+    btnDownload.hidden = false;
+    btnRetake.hidden = false;
+    setStatus('Foto capturada', 'ok');
+  } catch (err) {
+    console.error('Erro na captura:', err);
+    setStatus('Falha ao capturar', 'error');
+  } finally {
+    isCapturing = false;
+    btnCapture.disabled = false;
+  }
 }
 
 // --- Download ---
@@ -166,6 +261,7 @@ function download() {
   a.remove();
 }
 
+// --- Retake ---
 function retake() {
   preview.hidden = true;
   video.hidden = false;
