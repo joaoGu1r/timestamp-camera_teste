@@ -110,6 +110,7 @@ async function obterNomeDaRua(lat, lng) {
   url.searchParams.set('format', 'jsonv2');
   url.searchParams.set('addressdetails', '1');
   url.searchParams.set('accept-language', 'pt-BR');
+   
 
   // Timeout de 6s para não travar a UI
   const controller = new AbortController();
@@ -118,11 +119,7 @@ async function obterNomeDaRua(lat, lng) {
   try {
     const response = await fetch(url.toString(), {
       signal: controller.signal,
-      headers: {
-        // Identificação obrigatória pelas políticas do Nominatim
-        'User-Agent': 'TimestampCameraWeb/1.0 (timestamp-camera)'
-      }
-    });
+     
     clearTimeout(timeoutId);
 
     if (response.status === 429) {
